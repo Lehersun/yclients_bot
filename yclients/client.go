@@ -16,8 +16,13 @@ const searchTimeSlotsPath = "/api/v1/b2c/booking/availability/search-timeslots"
 type Client struct {
 	BaseURL    string
 	Token      string
-	Cookie     string
 	HTTPClient *http.Client
+}
+
+type Service struct {
+	ID       int
+	Title    string
+	PriceMin float64
 }
 
 type SearchTimeSlotsParams struct {
@@ -52,6 +57,16 @@ type searchTimeSlotsAttributes struct {
 	IsBookable bool   `json:"is_bookable"`
 }
 
+type availableServicesResponse struct {
+	Services []availableServiceItem `json:"services"`
+}
+
+type availableServiceItem struct {
+	ID       int     `json:"id"`
+	Title    string  `json:"title"`
+	PriceMin float64 `json:"price_min"`
+}
+
 func (c Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeSlotsParams) ([]time.Time, error) {
 	requestBody := searchTimeSlotsRequest{
 		Context: searchTimeSlotsContext{
@@ -74,9 +89,6 @@ func (c Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeS
 
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
-	if strings.TrimSpace(c.Cookie) != "" {
-		req.Header.Set("Cookie", c.Cookie)
-	}
 
 	httpClient := c.HTTPClient
 	if httpClient == nil {
@@ -118,4 +130,45 @@ func (c Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeS
 	}
 
 	return slots, nil
+}
+
+func (c Client) AvailableServices(ctx context.Context, locationID int) ([]Service, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/v1/b2c/booking/availability/book_services/%d?without_seances=1", strings.TrimRight(c.BaseURL, "/"), locationID), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("yclients available-services failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var decoded availableServicesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, err
+	}
+
+	services := make([]Service, 0, len(decoded.Services))
+	for _, item := range decoded.Services {
+		services = append(services, Service{
+			ID:       item.ID,
+			Title:    item.Title,
+			PriceMin: item.PriceMin,
+		})
+	}
+
+	return services, nil
 }

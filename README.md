@@ -45,7 +45,6 @@ The project also contains a focused `yclients` package for the booking timeslots
 client := yclients.Client{
     BaseURL: "https://platform.yclients.com",
     Token:   os.Getenv("YCLIENTS_BEARER_TOKEN"),
-    Cookie:  os.Getenv("YCLIENTS_COOKIE"),
 }
 
 slots, err := client.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParams{
@@ -56,6 +55,17 @@ slots, err := client.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParam
 
 It returns parsed `[]time.Time` values for entries where the API marks `is_bookable` as `true`.
 
+You can also fetch projected available services in Yclients API order:
+
+```go
+services, err := client.AvailableServices(ctx, 1296020)
+```
+
+Each item contains only:
+- `ID`
+- `Title`
+- `PriceMin`
+
 ## Run the real Yclients integration test
 
 If `YCLIENTS_BEARER_TOKEN` is set, the integration test runs automatically:
@@ -64,5 +74,3 @@ If `YCLIENTS_BEARER_TOKEN` is set, the integration test runs automatically:
 export YCLIENTS_BEARER_TOKEN='your-token'
 env GOCACHE=/tmp/go-build GOMODCACHE=/tmp/go-mod-cache go test ./yclients -run Integration -v
 ```
-
-`YCLIENTS_COOKIE` is optional. The token-only request was verified against the live endpoint.

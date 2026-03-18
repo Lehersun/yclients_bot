@@ -23,7 +23,6 @@ func TestSearchAvailableTimeSlotsIntegration(t *testing.T) {
 	client := Client{
 		BaseURL: "https://platform.yclients.com",
 		Token:   token,
-		Cookie:  os.Getenv("YCLIENTS_COOKIE"),
 	}
 
 	slots, err := client.SearchAvailableTimeSlots(context.Background(), SearchTimeSlotsParams{
