@@ -61,7 +61,19 @@ func run(token string) error {
 			continue
 		}
 
-		replyText, ok, err := bot.HandleText(context.Background(), update.Message.Text, deps)
+		normalizedText, ok := bot.NormalizeIncomingText(bot.IncomingMessage{
+			Text:        update.Message.Text,
+			ChatType:    update.Message.Chat.Type,
+			BotUsername: client.Self.UserName,
+			IsReplyToBot: update.Message.ReplyToMessage != nil &&
+				update.Message.ReplyToMessage.From != nil &&
+				update.Message.ReplyToMessage.From.ID == client.Self.ID,
+		})
+		if !ok {
+			continue
+		}
+
+		replyText, ok, err := bot.HandleText(context.Background(), normalizedText, deps)
 		if err != nil {
 			log.Printf("handle text: %v", err)
 			replyText = "Failed to load schedule."

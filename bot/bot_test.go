@@ -52,6 +52,68 @@ func TestReplyForText(t *testing.T) {
 	}
 }
 
+func TestNormalizeIncomingText(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    IncomingMessage
+		wantText string
+		wantOK   bool
+	}{
+		{
+			name: "private chat plain text is allowed",
+			input: IncomingMessage{
+				Text:     "hello",
+				ChatType: "private",
+			},
+			wantText: "hello",
+			wantOK:   true,
+		},
+		{
+			name: "group plain text is ignored",
+			input: IncomingMessage{
+				Text:        "hello",
+				ChatType:    "group",
+				BotUsername: "mybot",
+			},
+			wantText: "",
+			wantOK:   false,
+		},
+		{
+			name: "group mention is stripped",
+			input: IncomingMessage{
+				Text:        "@mybot hello",
+				ChatType:    "group",
+				BotUsername: "mybot",
+			},
+			wantText: "hello",
+			wantOK:   true,
+		},
+		{
+			name: "reply to bot is allowed",
+			input: IncomingMessage{
+				Text:         "schedule",
+				ChatType:     "supergroup",
+				BotUsername:  "mybot",
+				IsReplyToBot: true,
+			},
+			wantText: "schedule",
+			wantOK:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotText, gotOK := NormalizeIncomingText(tt.input)
+			if gotText != tt.wantText {
+				t.Fatalf("text = %q, want %q", gotText, tt.wantText)
+			}
+			if gotOK != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", gotOK, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestHandleTextSchedule(t *testing.T) {
 	moscow, err := time.LoadLocation("Europe/Moscow")
 	if err != nil {

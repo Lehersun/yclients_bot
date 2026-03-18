@@ -23,6 +23,13 @@ type Dependencies struct {
 	Now        func() time.Time
 }
 
+type IncomingMessage struct {
+	Text         string
+	ChatType     string
+	BotUsername  string
+	IsReplyToBot bool
+}
+
 // ReplyForText decides whether an incoming text message should trigger a reply.
 func ReplyForText(text string) (string, bool) {
 	if strings.EqualFold(strings.TrimSpace(text), "hello") {
@@ -30,6 +37,42 @@ func ReplyForText(text string) (string, bool) {
 	}
 
 	return "", false
+}
+
+func NormalizeIncomingText(message IncomingMessage) (string, bool) {
+	text := strings.TrimSpace(message.Text)
+	if text == "" {
+		return "", false
+	}
+
+	if message.ChatType == "" || message.ChatType == "private" {
+		return text, true
+	}
+
+	if message.IsReplyToBot {
+		return text, true
+	}
+
+	if message.BotUsername == "" {
+		return "", false
+	}
+
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return "", false
+	}
+
+	mention := "@" + strings.ToLower(message.BotUsername)
+	if strings.ToLower(fields[0]) != mention {
+		return "", false
+	}
+
+	normalized := strings.TrimSpace(strings.Join(fields[1:], " "))
+	if normalized == "" {
+		return "", false
+	}
+
+	return normalized, true
 }
 
 func HandleText(ctx context.Context, text string, deps Dependencies) (string, bool, error) {
