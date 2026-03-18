@@ -28,6 +28,7 @@ type Service struct {
 type SearchTimeSlotsParams struct {
 	LocationID int
 	Date       string
+	ServiceID  int
 }
 
 type searchTimeSlotsRequest struct {
@@ -40,7 +41,17 @@ type searchTimeSlotsContext struct {
 }
 
 type searchTimeSlotsFilter struct {
-	Date string `json:"date"`
+	Date    string                  `json:"date"`
+	Records []searchTimeSlotsRecord `json:"records,omitempty"`
+}
+
+type searchTimeSlotsRecord struct {
+	AttendanceServiceItems []searchTimeSlotsAttendanceServiceItem `json:"attendance_service_items"`
+}
+
+type searchTimeSlotsAttendanceServiceItem struct {
+	Type string `json:"type"`
+	ID   int    `json:"id"`
 }
 
 type searchTimeSlotsResponse struct {
@@ -75,6 +86,19 @@ func (c Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeS
 		Filter: searchTimeSlotsFilter{
 			Date: params.Date,
 		},
+	}
+
+	if params.ServiceID != 0 {
+		requestBody.Filter.Records = []searchTimeSlotsRecord{
+			{
+				AttendanceServiceItems: []searchTimeSlotsAttendanceServiceItem{
+					{
+						Type: "service",
+						ID:   params.ServiceID,
+					},
+				},
+			},
+		}
 	}
 
 	bodyBytes, err := json.Marshal(requestBody)

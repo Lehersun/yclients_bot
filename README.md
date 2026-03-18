@@ -50,6 +50,7 @@ client := yclients.Client{
 slots, err := client.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParams{
     LocationID: 1296020,
     Date:       "2026-03-18",
+    ServiceID:  19432008, // optional
 })
 ```
 

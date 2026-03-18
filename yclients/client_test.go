@@ -103,6 +103,59 @@ func TestSearchAvailableTimeSlotsReturnsErrorForBadStatus(t *testing.T) {
 	}
 }
 
+func TestSearchAvailableTimeSlotsWithServiceFilter(t *testing.T) {
+	client := Client{
+		BaseURL: "https://platform.yclients.com",
+		Token:   "test-token",
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var gotBody map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("Decode request body returned error: %v", err)
+				}
+
+				wantBody := map[string]any{
+					"context": map[string]any{
+						"location_id": float64(1296020),
+					},
+					"filter": map[string]any{
+						"date": "2026-03-18",
+						"records": []any{
+							map[string]any{
+								"attendance_service_items": []any{
+									map[string]any{
+										"type": "service",
+										"id":   float64(19432008),
+									},
+								},
+							},
+						},
+					},
+				}
+
+				if !reflect.DeepEqual(gotBody, wantBody) {
+					t.Fatalf("request body = %#v, want %#v", gotBody, wantBody)
+				}
+
+				return jsonResponse(r, http.StatusOK, `{"data":[{"type":"booking_search_result_timeslots","id":"a","attributes":{"datetime":"2026-03-18T18:00:00+03:00","time":"18:00","is_bookable":true}}]}`), nil
+			}),
+		},
+	}
+
+	gotSlots, err := client.SearchAvailableTimeSlots(context.Background(), SearchTimeSlotsParams{
+		LocationID: 1296020,
+		Date:       "2026-03-18",
+		ServiceID:  19432008,
+	})
+	if err != nil {
+		t.Fatalf("SearchAvailableTimeSlots returned error: %v", err)
+	}
+
+	if len(gotSlots) != 1 {
+		t.Fatalf("slots length = %d, want %d", len(gotSlots), 1)
+	}
+}
+
 func TestAvailableServices(t *testing.T) {
 	client := Client{
 		BaseURL: "https://platform.yclients.com",
