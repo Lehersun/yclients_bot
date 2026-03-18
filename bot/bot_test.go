@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,16 +167,24 @@ func TestHandleTextSchedule(t *testing.T) {
 		t.Fatalf("slotCalls = %d, want %d", len(scheduler.slotCalls), 28)
 	}
 
-	if scheduler.slotCalls[0].ServiceID != 19432008 || scheduler.slotCalls[0].Date != "2026-03-18" {
-		t.Fatalf("first slot call = %#v, want service 19432008 on 2026-03-18", scheduler.slotCalls[0])
+	if !hasSlotCall(scheduler.slotCalls, 19432008, "2026-03-18") {
+		t.Fatalf("slotCalls = %#v, want service 19432008 on 2026-03-18", scheduler.slotCalls)
 	}
 
-	if scheduler.slotCalls[6].ServiceID != 19432008 || scheduler.slotCalls[6].Date != "2026-03-24" {
-		t.Fatalf("seventh slot call = %#v, want service 19432008 on 2026-03-24", scheduler.slotCalls[6])
+	if !hasSlotCall(scheduler.slotCalls, 19432008, "2026-03-24") {
+		t.Fatalf("slotCalls = %#v, want service 19432008 on 2026-03-24", scheduler.slotCalls)
 	}
 
-	if scheduler.slotCalls[7].ServiceID != 19346630 || scheduler.slotCalls[7].Date != "2026-03-18" {
-		t.Fatalf("eighth slot call = %#v, want service 19346630 on 2026-03-18", scheduler.slotCalls[7])
+	if !hasSlotCall(scheduler.slotCalls, 19346630, "2026-03-18") {
+		t.Fatalf("slotCalls = %#v, want service 19346630 on 2026-03-18", scheduler.slotCalls)
+	}
+
+	if scheduler.maxConcurrent <= 1 {
+		t.Fatalf("maxConcurrent = %d, want > 1", scheduler.maxConcurrent)
+	}
+
+	if scheduler.maxConcurrent > 5 {
+		t.Fatalf("maxConcurrent = %d, want <= 5", scheduler.maxConcurrent)
 	}
 
 	wantReply := strings.Join([]string{
@@ -196,6 +205,9 @@ type fakeScheduler struct {
 	slotsByKey    map[string][]time.Time
 	servicesCalls int
 	slotCalls     []yclients.SearchTimeSlotsParams
+	mu            sync.Mutex
+	current       int
+	maxConcurrent int
 }
 
 func (f *fakeScheduler) AvailableServices(context.Context, int) ([]yclients.Service, error) {
@@ -204,10 +216,33 @@ func (f *fakeScheduler) AvailableServices(context.Context, int) ([]yclients.Serv
 }
 
 func (f *fakeScheduler) SearchAvailableTimeSlots(_ context.Context, params yclients.SearchTimeSlotsParams) ([]time.Time, error) {
+	f.mu.Lock()
+	f.current++
+	if f.current > f.maxConcurrent {
+		f.maxConcurrent = f.current
+	}
 	f.slotCalls = append(f.slotCalls, params)
-	return f.slotsByKey[slotKey(params.ServiceID, params.Date)], nil
+	f.mu.Unlock()
+
+	time.Sleep(10 * time.Millisecond)
+
+	f.mu.Lock()
+	f.current--
+	slots := f.slotsByKey[slotKey(params.ServiceID, params.Date)]
+	f.mu.Unlock()
+
+	return slots, nil
 }
 
 func slotKey(serviceID int, date string) string {
 	return strconv.Itoa(serviceID) + "|" + date
+}
+
+func hasSlotCall(calls []yclients.SearchTimeSlotsParams, serviceID int, date string) bool {
+	for _, call := range calls {
+		if call.ServiceID == serviceID && call.Date == date {
+			return true
+		}
+	}
+	return false
 }

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"yclients_bot/yclients"
@@ -108,6 +109,22 @@ func HandleText(ctx context.Context, text string, deps Dependencies) (string, bo
 	}
 
 	baseDate := nowFn().In(location)
+	type slotTask struct {
+		ServiceID   int
+		CourtNumber int
+		CourtLabel  string
+		Duration    string
+		Date        string
+	}
+	type slotResult struct {
+		CourtNumber int
+		CourtLabel  string
+		Duration    string
+		Slots       []time.Time
+		Err         error
+	}
+
+	tasks := make([]slotTask, 0, len(services)*7)
 	grouped := map[string]map[string]map[int]*courtAvailability{}
 
 	for _, service := range services {
@@ -118,36 +135,72 @@ func HandleText(ctx context.Context, text string, deps Dependencies) (string, bo
 		duration := detectDuration(service.Title)
 
 		for dayOffset := 0; dayOffset < 7; dayOffset++ {
-			date := baseDate.AddDate(0, 0, dayOffset).Format("2006-01-02")
+			tasks = append(tasks, slotTask{
+				ServiceID:   service.ID,
+				CourtNumber: courtNumber,
+				CourtLabel:  courtLabel,
+				Duration:    duration,
+				Date:        baseDate.AddDate(0, 0, dayOffset).Format("2006-01-02"),
+			})
+		}
+	}
+
+	results := make(chan slotResult, len(tasks))
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(task slotTask) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			slots, err := deps.Scheduler.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParams{
 				LocationID: deps.LocationID,
-				Date:       date,
-				ServiceID:  service.ID,
+				Date:       task.Date,
+				ServiceID:  task.ServiceID,
 			})
-			if err != nil {
-				return "", true, err
+			results <- slotResult{
+				CourtNumber: task.CourtNumber,
+				CourtLabel:  task.CourtLabel,
+				Duration:    task.Duration,
+				Slots:       slots,
+				Err:         err,
+			}
+		}(task)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for result := range results {
+		if result.Err != nil {
+			return "", true, result.Err
+		}
+
+		for _, slot := range result.Slots {
+			slot = slot.In(location)
+			dateKey := slot.Format("02.01.2006")
+			timeKey := slot.Format("15:04")
+
+			if grouped[dateKey] == nil {
+				grouped[dateKey] = map[string]map[int]*courtAvailability{}
+			}
+			if grouped[dateKey][timeKey] == nil {
+				grouped[dateKey][timeKey] = map[int]*courtAvailability{}
+			}
+			if grouped[dateKey][timeKey][result.CourtNumber] == nil {
+				grouped[dateKey][timeKey][result.CourtNumber] = &courtAvailability{
+					Label:     result.CourtLabel,
+					Durations: map[string]bool{},
+				}
 			}
 
-			for _, slot := range slots {
-				slot = slot.In(location)
-				dateKey := slot.Format("02.01.2006")
-				timeKey := slot.Format("15:04")
-
-				if grouped[dateKey] == nil {
-					grouped[dateKey] = map[string]map[int]*courtAvailability{}
-				}
-				if grouped[dateKey][timeKey] == nil {
-					grouped[dateKey][timeKey] = map[int]*courtAvailability{}
-				}
-				if grouped[dateKey][timeKey][courtNumber] == nil {
-					grouped[dateKey][timeKey][courtNumber] = &courtAvailability{
-						Label:     courtLabel,
-						Durations: map[string]bool{},
-					}
-				}
-
-				grouped[dateKey][timeKey][courtNumber].Durations[duration] = true
-			}
+			grouped[dateKey][timeKey][result.CourtNumber].Durations[result.Duration] = true
 		}
 	}
 
