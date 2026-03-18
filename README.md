@@ -76,7 +76,8 @@ Each item contains only:
 ## Bot commands
 
 - `hello` replies with `Hello!`
-- `schedule` fetches available services, checks each service for the next 7 days in `Europe/Moscow`, and returns only services that have at least one slot
+- `schedule` sends `Выберите дату` with inline buttons for the next 7 days in `Europe/Moscow`
+- selecting a date triggers a filtered Yclients request for that day only and returns a message like `📅 20.03.2026` and `🕒 08:00, 09:00, ...`
 
 ## Run the real Yclients integration test
 

@@ -3,7 +3,6 @@ package bot
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +23,16 @@ type Dependencies struct {
 	Now        func() time.Time
 }
 
+type DateOption struct {
+	Label string
+	Value string
+}
+
+type Response struct {
+	Text        string
+	DateOptions []DateOption
+}
+
 type IncomingMessage struct {
 	Text         string
 	ChatType     string
@@ -33,7 +42,7 @@ type IncomingMessage struct {
 
 // ReplyForText decides whether an incoming text message should trigger a reply.
 func ReplyForText(text string) (string, bool) {
-	if strings.EqualFold(strings.TrimSpace(text), "hello") {
+	if strings.EqualFold(normalizeCommandText(text), "hello") {
 		return "Hello!", true
 	}
 
@@ -47,15 +56,19 @@ func NormalizeIncomingText(message IncomingMessage) (string, bool) {
 	}
 
 	if message.ChatType == "" || message.ChatType == "private" {
-		return text, true
+		return normalizeCommandText(text), true
 	}
 
 	if message.IsReplyToBot {
-		return text, true
+		return normalizeCommandText(text), true
 	}
 
 	if message.BotUsername == "" {
 		return "", false
+	}
+
+	if normalized, ok := normalizeMentionedSlashCommand(text, message.BotUsername); ok {
+		return normalized, true
 	}
 
 	fields := strings.Fields(text)
@@ -68,7 +81,7 @@ func NormalizeIncomingText(message IncomingMessage) (string, bool) {
 		return "", false
 	}
 
-	normalized := strings.TrimSpace(strings.Join(fields[1:], " "))
+	normalized := normalizeCommandText(strings.TrimSpace(strings.Join(fields[1:], " ")))
 	if normalized == "" {
 		return "", false
 	}
@@ -76,15 +89,42 @@ func NormalizeIncomingText(message IncomingMessage) (string, bool) {
 	return normalized, true
 }
 
-func HandleText(ctx context.Context, text string, deps Dependencies) (string, bool, error) {
+func HandleText(_ context.Context, text string, deps Dependencies) (Response, bool, error) {
+	text = normalizeCommandText(text)
+
 	if reply, ok := ReplyForText(text); ok {
-		return reply, true, nil
+		return Response{Text: reply}, true, nil
 	}
 
-	if !strings.EqualFold(strings.TrimSpace(text), "schedule") {
-		return "", false, nil
+	if !isScheduleCommand(text) {
+		return Response{}, false, nil
 	}
 
+	if deps.Scheduler == nil {
+		return Response{Text: "Schedule is not configured."}, true, nil
+	}
+
+	if deps.LocationID == 0 {
+		return Response{}, true, fmt.Errorf("location id is required")
+	}
+
+	location := deps.Location
+	if location == nil {
+		location = time.Local
+	}
+
+	nowFn := deps.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+
+	return Response{
+		Text:        "Выберите дату",
+		DateOptions: buildDateOptions(nowFn().In(location)),
+	}, true, nil
+}
+
+func HandleSelectedDate(ctx context.Context, date string, deps Dependencies) (string, bool, error) {
 	if deps.Scheduler == nil {
 		return "Schedule is not configured.", true, nil
 	}
@@ -98,9 +138,9 @@ func HandleText(ctx context.Context, text string, deps Dependencies) (string, bo
 		location = time.Local
 	}
 
-	nowFn := deps.Now
-	if nowFn == nil {
-		nowFn = time.Now
+	selectedDate, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(date), location)
+	if err != nil {
+		return "", false, nil
 	}
 
 	services, err := deps.Scheduler.AvailableServices(ctx, deps.LocationID)
@@ -108,50 +148,18 @@ func HandleText(ctx context.Context, text string, deps Dependencies) (string, bo
 		return "", true, err
 	}
 
-	baseDate := nowFn().In(location)
-	type slotTask struct {
-		ServiceID   int
-		CourtNumber int
-		CourtLabel  string
-		Duration    string
-		Date        string
-	}
 	type slotResult struct {
-		CourtNumber int
-		CourtLabel  string
-		Duration    string
-		Slots       []time.Time
-		Err         error
+		Slots []time.Time
+		Err   error
 	}
 
-	tasks := make([]slotTask, 0, len(services)*7)
-	grouped := map[string]map[string]map[int]*courtAvailability{}
-
-	for _, service := range services {
-		courtNumber, courtLabel := normalizeCourtLabel(service.Title)
-		if courtNumber == 0 {
-			continue
-		}
-		duration := detectDuration(service.Title)
-
-		for dayOffset := 0; dayOffset < 7; dayOffset++ {
-			tasks = append(tasks, slotTask{
-				ServiceID:   service.ID,
-				CourtNumber: courtNumber,
-				CourtLabel:  courtLabel,
-				Duration:    duration,
-				Date:        baseDate.AddDate(0, 0, dayOffset).Format("2006-01-02"),
-			})
-		}
-	}
-
-	results := make(chan slotResult, len(tasks))
+	results := make(chan slotResult, len(services))
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
 
-	for _, task := range tasks {
+	for _, service := range services {
 		wg.Add(1)
-		go func(task slotTask) {
+		go func(serviceID int) {
 			defer wg.Done()
 
 			sem <- struct{}{}
@@ -159,17 +167,14 @@ func HandleText(ctx context.Context, text string, deps Dependencies) (string, bo
 
 			slots, err := deps.Scheduler.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParams{
 				LocationID: deps.LocationID,
-				Date:       task.Date,
-				ServiceID:  task.ServiceID,
+				Date:       selectedDate.Format("2006-01-02"),
+				ServiceID:  serviceID,
 			})
 			results <- slotResult{
-				CourtNumber: task.CourtNumber,
-				CourtLabel:  task.CourtLabel,
-				Duration:    task.Duration,
-				Slots:       slots,
-				Err:         err,
+				Slots: slots,
+				Err:   err,
 			}
-		}(task)
+		}(service.ID)
 	}
 
 	go func() {
@@ -177,120 +182,83 @@ func HandleText(ctx context.Context, text string, deps Dependencies) (string, bo
 		close(results)
 	}()
 
+	timeSet := map[string]bool{}
 	for result := range results {
 		if result.Err != nil {
 			return "", true, result.Err
 		}
 
 		for _, slot := range result.Slots {
-			slot = slot.In(location)
-			dateKey := slot.Format("02.01.2006")
-			timeKey := slot.Format("15:04")
-
-			if grouped[dateKey] == nil {
-				grouped[dateKey] = map[string]map[int]*courtAvailability{}
-			}
-			if grouped[dateKey][timeKey] == nil {
-				grouped[dateKey][timeKey] = map[int]*courtAvailability{}
-			}
-			if grouped[dateKey][timeKey][result.CourtNumber] == nil {
-				grouped[dateKey][timeKey][result.CourtNumber] = &courtAvailability{
-					Label:     result.CourtLabel,
-					Durations: map[string]bool{},
-				}
-			}
-
-			grouped[dateKey][timeKey][result.CourtNumber].Durations[result.Duration] = true
+			timeSet[slot.In(location).Format("15:04")] = true
 		}
 	}
 
-	if len(grouped) == 0 {
-		return "No available slots in the next 7 days.", true, nil
+	timeKeys := make([]string, 0, len(timeSet))
+	for timeKey := range timeSet {
+		timeKeys = append(timeKeys, timeKey)
 	}
+	sort.Strings(timeKeys)
 
-	return formatSchedule(grouped), true, nil
+	return formatSelectedDate(selectedDate, timeKeys), true, nil
 }
 
-type courtAvailability struct {
-	Label     string
-	Durations map[string]bool
+func buildDateOptions(baseDate time.Time) []DateOption {
+	options := make([]DateOption, 0, 7)
+	for dayOffset := 0; dayOffset < 7; dayOffset++ {
+		currentDate := baseDate.AddDate(0, 0, dayOffset)
+		options = append(options, DateOption{
+			Label: currentDate.Format("02.01"),
+			Value: currentDate.Format("2006-01-02"),
+		})
+	}
+
+	return options
 }
 
-var courtPattern = regexp.MustCompile(`(?i)(?:корт\s*(\d+)|(\d+)\s*корт)`)
-
-func normalizeCourtLabel(title string) (int, string) {
-	match := courtPattern.FindStringSubmatch(title)
-	if len(match) < 3 {
-		return 0, ""
+func formatSelectedDate(selectedDate time.Time, timeKeys []string) string {
+	if len(timeKeys) == 0 {
+		return fmt.Sprintf("📅 %s\n🕒 Нет свободных слотов", selectedDate.Format("02.01.2006"))
 	}
 
-	number := match[1]
-	if number == "" {
-		number = match[2]
-	}
-
-	var courtNumber int
-	fmt.Sscanf(number, "%d", &courtNumber)
-	if courtNumber == 0 {
-		return 0, ""
-	}
-
-	return courtNumber, fmt.Sprintf("корт %d", courtNumber)
+	return fmt.Sprintf("📅 %s\n🕒 %s", selectedDate.Format("02.01.2006"), strings.Join(timeKeys, ", "))
 }
 
-func detectDuration(title string) string {
-	lower := strings.ToLower(title)
-	if strings.Contains(lower, "2 часа") || strings.Contains(lower, "2часа") {
-		return "на два"
+func normalizeCommandText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
 	}
-	return "на час"
+
+	if !strings.HasPrefix(trimmed, "/") {
+		return trimmed
+	}
+
+	command := strings.Fields(trimmed)[0]
+	command = strings.TrimPrefix(command, "/")
+	if command == "" {
+		return ""
+	}
+
+	name, _, _ := strings.Cut(command, "@")
+	return strings.TrimSpace(name)
 }
 
-func formatSchedule(grouped map[string]map[string]map[int]*courtAvailability) string {
-	dateKeys := make([]string, 0, len(grouped))
-	for dateKey := range grouped {
-		dateKeys = append(dateKeys, dateKey)
-	}
-	sort.Slice(dateKeys, func(i, j int) bool {
-		left, _ := time.Parse("02.01.2006", dateKeys[i])
-		right, _ := time.Parse("02.01.2006", dateKeys[j])
-		return left.Before(right)
-	})
-
-	lines := make([]string, 0)
-	for _, dateKey := range dateKeys {
-		lines = append(lines, dateKey+":")
-
-		timeKeys := make([]string, 0, len(grouped[dateKey]))
-		for timeKey := range grouped[dateKey] {
-			timeKeys = append(timeKeys, timeKey)
-		}
-		sort.Strings(timeKeys)
-
-		for _, timeKey := range timeKeys {
-			courts := grouped[dateKey][timeKey]
-			courtNumbers := make([]int, 0, len(courts))
-			for courtNumber := range courts {
-				courtNumbers = append(courtNumbers, courtNumber)
-			}
-			sort.Ints(courtNumbers)
-
-			items := make([]string, 0, len(courtNumbers))
-			for _, courtNumber := range courtNumbers {
-				court := courts[courtNumber]
-				durations := make([]string, 0, 2)
-				if court.Durations["на час"] {
-					durations = append(durations, "на час")
-				}
-				if court.Durations["на два"] {
-					durations = append(durations, "на два")
-				}
-				items = append(items, fmt.Sprintf("%s (%s)", court.Label, strings.Join(durations, ", ")))
-			}
-
-			lines = append(lines, fmt.Sprintf("%s - %s", timeKey, strings.Join(items, ", ")))
-		}
+func normalizeMentionedSlashCommand(text string, botUsername string) (string, bool) {
+	command := strings.Fields(strings.TrimSpace(text))
+	if len(command) == 0 || !strings.HasPrefix(command[0], "/") {
+		return "", false
 	}
 
-	return strings.Join(lines, "\n")
+	name := strings.TrimPrefix(command[0], "/")
+	commandName, mentionedBot, hasMention := strings.Cut(name, "@")
+	if !hasMention || !strings.EqualFold(mentionedBot, botUsername) {
+		return "", false
+	}
+
+	return strings.TrimSpace(commandName), true
+}
+
+func isScheduleCommand(text string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(text))
+	return normalized == "schedule" || normalized == "расписание"
 }
