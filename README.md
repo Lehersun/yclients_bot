@@ -78,6 +78,7 @@ Each item contains only:
 - `hello` replies with `Hello!`
 - `schedule` sends `Выберите дату` with inline buttons for the next 7 days in `Europe/Moscow`
 - selecting a date triggers a filtered Yclients request for that day only and returns a message like `📅 20.03.2026` and `🕒 08:00, 09:00, ...`
+- any unsupported message addressed to the bot returns a short help message describing that it shows available padel courts on Frunze and how to request the schedule
 
 ## Run the real Yclients integration test
 
