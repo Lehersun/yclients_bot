@@ -36,3 +36,33 @@ Run the process under `systemd` so it starts on boot and restarts if it exits un
 - `TELEGRAM_BOT_TOKEN` from the shell environment wins.
 - `.env` is used only as a local fallback.
 - Do not commit real bot tokens into source files.
+
+## Yclients client package
+
+The project also contains a focused `yclients` package for the booking timeslots endpoint:
+
+```go
+client := yclients.Client{
+    BaseURL: "https://platform.yclients.com",
+    Token:   os.Getenv("YCLIENTS_BEARER_TOKEN"),
+    Cookie:  os.Getenv("YCLIENTS_COOKIE"),
+}
+
+slots, err := client.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParams{
+    LocationID: 1296020,
+    Date:       "2026-03-18",
+})
+```
+
+It returns parsed `[]time.Time` values for entries where the API marks `is_bookable` as `true`.
+
+## Run the real Yclients integration test
+
+If `YCLIENTS_BEARER_TOKEN` is set, the integration test runs automatically:
+
+```bash
+export YCLIENTS_BEARER_TOKEN='your-token'
+env GOCACHE=/tmp/go-build GOMODCACHE=/tmp/go-mod-cache go test ./yclients -run Integration -v
+```
+
+`YCLIENTS_COOKIE` is optional. The token-only request was verified against the live endpoint.
