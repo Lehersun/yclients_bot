@@ -97,7 +97,7 @@ func HandleText(_ context.Context, text string, deps Dependencies) (Response, bo
 	}
 
 	if !isScheduleCommand(text) {
-		return Response{}, false, nil
+		return Response{Text: helpText()}, true, nil
 	}
 
 	if deps.Scheduler == nil {
@@ -261,4 +261,12 @@ func normalizeMentionedSlashCommand(text string, botUsername string) (string, bo
 func isScheduleCommand(text string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(text))
 	return normalized == "schedule" || normalized == "расписание"
+}
+
+func helpText() string {
+	return strings.Join([]string{
+		"Я показываю доступные падел-корты на Фрунзе.",
+		"После выбора даты отправляю свободное время для бронирования.",
+		"Как воспользоваться: напишите `расписание`.",
+	}, "\n")
 }

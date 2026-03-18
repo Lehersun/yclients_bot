@@ -178,6 +178,38 @@ func TestHandleTextRussianScheduleAliasReturnsDatePicker(t *testing.T) {
 	}
 }
 
+func TestHandleTextUnsupportedReturnsHelp(t *testing.T) {
+	reply, ok, err := HandleText(context.Background(), "что ты умеешь", Dependencies{})
+	if err != nil {
+		t.Fatalf("HandleText returned error: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("HandleText ok = false, want true")
+	}
+
+	wantReply := helpText()
+	if reply.Text != wantReply {
+		t.Fatalf("reply.Text = %q, want %q", reply.Text, wantReply)
+	}
+}
+
+func TestHandleTextStartReturnsHelp(t *testing.T) {
+	reply, ok, err := HandleText(context.Background(), "/start", Dependencies{})
+	if err != nil {
+		t.Fatalf("HandleText returned error: %v", err)
+	}
+
+	if !ok {
+		t.Fatal("HandleText ok = false, want true")
+	}
+
+	wantReply := helpText()
+	if reply.Text != wantReply {
+		t.Fatalf("reply.Text = %q, want %q", reply.Text, wantReply)
+	}
+}
+
 func TestReplyForTextSlashCommand(t *testing.T) {
 	reply, ok := ReplyForText("/hello")
 	if !ok {

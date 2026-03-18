@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -16,6 +17,7 @@ import (
 )
 
 const scheduleDateCallbackPrefix = "schedule_date:"
+const waitingText = "⌛ Ищу свободное время..."
 
 func main() {
 	token, err := config.LoadTelegramToken(".env")
@@ -60,19 +62,8 @@ func run(token string) error {
 	}
 
 	for update := range updates {
-		responses, err := buildResponsesForUpdate(context.Background(), update, deps, client.Self.UserName, client.Self.ID)
-		if err != nil {
+		if err := processUpdate(context.Background(), client, update, deps, client.Self.UserName, client.Self.ID); err != nil {
 			log.Printf("handle update: %v", err)
-			if failureResponse, ok := failureResponseForUpdate(update); ok {
-				if sendErr := sendResponses(client, []tgbotapi.Chattable{failureResponse}); sendErr != nil {
-					log.Printf("send failure reply: %v", sendErr)
-				}
-			}
-			continue
-		}
-
-		if err := sendResponses(client, responses); err != nil {
-			log.Printf("send reply: %v", err)
 		}
 	}
 
@@ -82,6 +73,28 @@ func run(token string) error {
 type telegramSender interface {
 	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
 	Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
+}
+
+func processUpdate(ctx context.Context, client telegramSender, update tgbotapi.Update, deps bot.Dependencies, botUsername string, botID int64) error {
+	if update.CallbackQuery != nil {
+		return processScheduleDateCallback(ctx, client, update.CallbackQuery, deps)
+	}
+
+	responses, err := buildResponsesForUpdate(ctx, update, deps, botUsername, botID)
+	if err != nil {
+		if failureResponse, ok := failureResponseForUpdate(update); ok {
+			if sendErr := sendResponses(client, []tgbotapi.Chattable{failureResponse}); sendErr != nil {
+				return fmt.Errorf("send failure reply: %w", sendErr)
+			}
+		}
+		return err
+	}
+
+	if err := sendResponses(client, responses); err != nil {
+		return fmt.Errorf("send reply: %w", err)
+	}
+
+	return nil
 }
 
 func buildResponsesForUpdate(ctx context.Context, update tgbotapi.Update, deps bot.Dependencies, botUsername string, botID int64) ([]tgbotapi.Chattable, error) {
@@ -114,28 +127,57 @@ func buildResponsesForUpdate(ctx context.Context, update tgbotapi.Update, deps b
 		return []tgbotapi.Chattable{message}, nil
 	}
 
-	if update.CallbackQuery != nil {
-		selectedDate, ok := parseSelectedDateCallback(update.CallbackQuery.Data)
-		if !ok || update.CallbackQuery.Message == nil || update.CallbackQuery.Message.Chat == nil {
-			return nil, nil
-		}
+	return nil, nil
+}
 
-		replyText, ok, err := bot.HandleSelectedDate(ctx, selectedDate, deps)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			return nil, nil
-		}
-
-		return []tgbotapi.Chattable{
-			tgbotapi.NewCallback(update.CallbackQuery.ID, ""),
-			tgbotapi.NewDeleteMessage(update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Message.MessageID),
-			tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, replyText),
-		}, nil
+func processScheduleDateCallback(ctx context.Context, client telegramSender, callback *tgbotapi.CallbackQuery, deps bot.Dependencies) error {
+	if callback == nil || callback.Message == nil || callback.Message.Chat == nil {
+		return nil
 	}
 
-	return nil, nil
+	selectedDate, ok := parseSelectedDateCallback(callback.Data)
+	if !ok {
+		return nil
+	}
+
+	if err := sendResponses(client, []tgbotapi.Chattable{
+		tgbotapi.NewCallback(callback.ID, ""),
+		tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID),
+	}); err != nil {
+		return fmt.Errorf("send callback cleanup: %w", err)
+	}
+
+	waitingMessage, err := client.Send(tgbotapi.NewMessage(callback.Message.Chat.ID, waitingText))
+	if err != nil {
+		return fmt.Errorf("send waiting message: %w", err)
+	}
+
+	replyText, ok, handleErr := bot.HandleSelectedDate(ctx, selectedDate, deps)
+	deleteErr := deleteMessage(client, callback.Message.Chat.ID, waitingMessage.MessageID)
+
+	if handleErr != nil {
+		if deleteErr != nil {
+			return fmt.Errorf("handle selected date: %v; delete waiting message: %w", handleErr, deleteErr)
+		}
+		if _, sendErr := client.Send(tgbotapi.NewMessage(callback.Message.Chat.ID, "Failed to load schedule.")); sendErr != nil {
+			return fmt.Errorf("handle selected date: %v; send failure reply: %w", handleErr, sendErr)
+		}
+		return handleErr
+	}
+
+	if deleteErr != nil {
+		return fmt.Errorf("delete waiting message: %w", deleteErr)
+	}
+
+	if !ok {
+		return nil
+	}
+
+	if _, err := client.Send(tgbotapi.NewMessage(callback.Message.Chat.ID, replyText)); err != nil {
+		return fmt.Errorf("send schedule reply: %w", err)
+	}
+
+	return nil
 }
 
 func sendResponses(client telegramSender, responses []tgbotapi.Chattable) error {
@@ -157,6 +199,15 @@ func sendResponses(client telegramSender, responses []tgbotapi.Chattable) error 
 	}
 
 	return nil
+}
+
+func deleteMessage(client telegramSender, chatID int64, messageID int) error {
+	if messageID == 0 {
+		return nil
+	}
+
+	_, err := client.Request(tgbotapi.NewDeleteMessage(chatID, messageID))
+	return err
 }
 
 func failureResponseForUpdate(update tgbotapi.Update) (tgbotapi.MessageConfig, bool) {

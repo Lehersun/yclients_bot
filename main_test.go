@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -56,12 +58,18 @@ func TestParseSelectedDateCallback(t *testing.T) {
 	}
 }
 
-func TestBuildResponsesForUpdateSelectedDate(t *testing.T) {
+func TestProcessUpdateSelectedDateShowsAndRemovesWaitingMessage(t *testing.T) {
 	moscow, err := time.LoadLocation("Europe/Moscow")
 	if err != nil {
 		t.Fatalf("LoadLocation returned error: %v", err)
 	}
 
+	client := &fakeTelegramClient{
+		sendResults: []tgbotapi.Message{
+			{MessageID: 501},
+			{MessageID: 502},
+		},
+	}
 	scheduler := &mainFakeScheduler{
 		services: []yclients.Service{
 			{ID: 1, Title: "Court 1"},
@@ -84,44 +92,69 @@ func TestBuildResponsesForUpdateSelectedDate(t *testing.T) {
 		},
 	}
 
-	responses, err := buildResponsesForUpdate(context.Background(), update, bot.Dependencies{
+	err = processUpdate(context.Background(), client, update, bot.Dependencies{
 		Scheduler:  scheduler,
 		LocationID: 1296020,
 		Location:   moscow,
 	}, "mybot", 100)
 	if err != nil {
-		t.Fatalf("buildResponsesForUpdate returned error: %v", err)
+		t.Fatalf("processUpdate returned error: %v", err)
 	}
 
-	if len(responses) != 3 {
-		t.Fatalf("len(responses) = %d, want %d", len(responses), 3)
+	wantCalls := []string{
+		"request:tgbotapi.CallbackConfig",
+		"request:tgbotapi.DeleteMessageConfig",
+		"send:tgbotapi.MessageConfig",
+		"request:tgbotapi.DeleteMessageConfig",
+		"send:tgbotapi.MessageConfig",
+	}
+	if len(client.calls) != len(wantCalls) {
+		t.Fatalf("len(client.calls) = %d, want %d", len(client.calls), len(wantCalls))
+	}
+	for i, want := range wantCalls {
+		if client.calls[i] != want {
+			t.Fatalf("client.calls[%d] = %q, want %q", i, client.calls[i], want)
+		}
 	}
 
-	callback, ok := responses[0].(tgbotapi.CallbackConfig)
+	callback, ok := client.requested[0].(tgbotapi.CallbackConfig)
 	if !ok {
-		t.Fatalf("responses[0] type = %T, want CallbackConfig", responses[0])
+		t.Fatalf("client.requested[0] type = %T, want CallbackConfig", client.requested[0])
 	}
 	if callback.CallbackQueryID != "callback-1" {
 		t.Fatalf("callback.CallbackQueryID = %q, want %q", callback.CallbackQueryID, "callback-1")
 	}
 
-	deleteMessage, ok := responses[1].(tgbotapi.DeleteMessageConfig)
+	deleteOriginal, ok := client.requested[1].(tgbotapi.DeleteMessageConfig)
 	if !ok {
-		t.Fatalf("responses[1] type = %T, want DeleteMessageConfig", responses[1])
+		t.Fatalf("client.requested[1] type = %T, want DeleteMessageConfig", client.requested[1])
 	}
-	if deleteMessage.ChatID != 42 {
-		t.Fatalf("deleteMessage.ChatID = %d, want %d", deleteMessage.ChatID, 42)
+	if deleteOriginal.ChatID != 42 {
+		t.Fatalf("deleteOriginal.ChatID = %d, want %d", deleteOriginal.ChatID, 42)
 	}
-	if deleteMessage.MessageID != 77 {
-		t.Fatalf("deleteMessage.MessageID = %d, want %d", deleteMessage.MessageID, 77)
+	if deleteOriginal.MessageID != 77 {
+		t.Fatalf("deleteOriginal.MessageID = %d, want %d", deleteOriginal.MessageID, 77)
 	}
 
-	message, ok := responses[2].(tgbotapi.MessageConfig)
+	waitingMessage, ok := client.sent[0].(tgbotapi.MessageConfig)
 	if !ok {
-		t.Fatalf("responses[2] type = %T, want MessageConfig", responses[2])
+		t.Fatalf("client.sent[0] type = %T, want MessageConfig", client.sent[0])
 	}
-	if message.ChatID != 42 {
-		t.Fatalf("message.ChatID = %d, want %d", message.ChatID, 42)
+	if waitingMessage.Text != waitingText {
+		t.Fatalf("waitingMessage.Text = %q, want %q", waitingMessage.Text, waitingText)
+	}
+
+	deleteWaiting, ok := client.requested[2].(tgbotapi.DeleteMessageConfig)
+	if !ok {
+		t.Fatalf("client.requested[2] type = %T, want DeleteMessageConfig", client.requested[2])
+	}
+	if deleteWaiting.MessageID != 501 {
+		t.Fatalf("deleteWaiting.MessageID = %d, want %d", deleteWaiting.MessageID, 501)
+	}
+
+	message, ok := client.sent[1].(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("client.sent[1] type = %T, want MessageConfig", client.sent[1])
 	}
 	if message.Text != "📅 20.03.2026\n🕒 08:00, 09:00" {
 		t.Fatalf("message.Text = %q, want %q", message.Text, "📅 20.03.2026\n🕒 08:00, 09:00")
@@ -129,6 +162,75 @@ func TestBuildResponsesForUpdateSelectedDate(t *testing.T) {
 
 	if len(scheduler.slotCalls) != 2 {
 		t.Fatalf("slotCalls = %d, want %d", len(scheduler.slotCalls), 2)
+	}
+}
+
+func TestProcessUpdateSelectedDateRemovesWaitingMessageOnError(t *testing.T) {
+	moscow, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		t.Fatalf("LoadLocation returned error: %v", err)
+	}
+
+	client := &fakeTelegramClient{
+		sendResults: []tgbotapi.Message{
+			{MessageID: 601},
+			{MessageID: 602},
+		},
+	}
+	scheduler := &mainFakeScheduler{
+		availableServicesErr: errors.New("boom"),
+	}
+
+	update := tgbotapi.Update{
+		CallbackQuery: &tgbotapi.CallbackQuery{
+			ID:   "callback-2",
+			Data: scheduleDateCallbackData("2026-03-20"),
+			Message: &tgbotapi.Message{
+				MessageID: 88,
+				Chat:      &tgbotapi.Chat{ID: 43},
+			},
+		},
+	}
+
+	err = processUpdate(context.Background(), client, update, bot.Dependencies{
+		Scheduler:  scheduler,
+		LocationID: 1296020,
+		Location:   moscow,
+	}, "mybot", 100)
+	if err == nil {
+		t.Fatal("processUpdate error = nil, want non-nil")
+	}
+
+	wantCalls := []string{
+		"request:tgbotapi.CallbackConfig",
+		"request:tgbotapi.DeleteMessageConfig",
+		"send:tgbotapi.MessageConfig",
+		"request:tgbotapi.DeleteMessageConfig",
+		"send:tgbotapi.MessageConfig",
+	}
+	if len(client.calls) != len(wantCalls) {
+		t.Fatalf("len(client.calls) = %d, want %d", len(client.calls), len(wantCalls))
+	}
+	for i, want := range wantCalls {
+		if client.calls[i] != want {
+			t.Fatalf("client.calls[%d] = %q, want %q", i, client.calls[i], want)
+		}
+	}
+
+	deleteWaiting, ok := client.requested[2].(tgbotapi.DeleteMessageConfig)
+	if !ok {
+		t.Fatalf("client.requested[2] type = %T, want DeleteMessageConfig", client.requested[2])
+	}
+	if deleteWaiting.MessageID != 601 {
+		t.Fatalf("deleteWaiting.MessageID = %d, want %d", deleteWaiting.MessageID, 601)
+	}
+
+	failureMessage, ok := client.sent[1].(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("client.sent[1] type = %T, want MessageConfig", client.sent[1])
+	}
+	if failureMessage.Text != "Failed to load schedule." {
+		t.Fatalf("failureMessage.Text = %q, want %q", failureMessage.Text, "Failed to load schedule.")
 	}
 }
 
@@ -163,16 +265,24 @@ func TestSendResponsesUsesRequestForCallback(t *testing.T) {
 }
 
 type mainFakeScheduler struct {
-	services   []yclients.Service
-	slotsByKey map[string][]time.Time
-	slotCalls  []yclients.SearchTimeSlotsParams
+	services             []yclients.Service
+	slotsByKey           map[string][]time.Time
+	slotCalls            []yclients.SearchTimeSlotsParams
+	availableServicesErr error
+	searchTimeSlotsErr   error
 }
 
 func (f *mainFakeScheduler) AvailableServices(context.Context, int) ([]yclients.Service, error) {
+	if f.availableServicesErr != nil {
+		return nil, f.availableServicesErr
+	}
 	return f.services, nil
 }
 
 func (f *mainFakeScheduler) SearchAvailableTimeSlots(_ context.Context, params yclients.SearchTimeSlotsParams) ([]time.Time, error) {
+	if f.searchTimeSlotsErr != nil {
+		return nil, f.searchTimeSlotsErr
+	}
 	f.slotCalls = append(f.slotCalls, params)
 	return f.slotsByKey[mainSlotKey(params.ServiceID, params.Date)], nil
 }
@@ -182,16 +292,29 @@ func mainSlotKey(serviceID int, date string) string {
 }
 
 type fakeTelegramClient struct {
-	sent      []tgbotapi.Chattable
-	requested []tgbotapi.Chattable
+	sent        []tgbotapi.Chattable
+	requested   []tgbotapi.Chattable
+	calls       []string
+	sendResults []tgbotapi.Message
 }
 
 func (f *fakeTelegramClient) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	f.calls = append(f.calls, "send:"+typeName(c))
 	f.sent = append(f.sent, c)
+	if len(f.sendResults) > 0 {
+		result := f.sendResults[0]
+		f.sendResults = f.sendResults[1:]
+		return result, nil
+	}
 	return tgbotapi.Message{}, nil
 }
 
 func (f *fakeTelegramClient) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	f.calls = append(f.calls, "request:"+typeName(c))
 	f.requested = append(f.requested, c)
 	return &tgbotapi.APIResponse{Ok: true}, nil
+}
+
+func typeName(value any) string {
+	return fmt.Sprintf("%T", value)
 }
