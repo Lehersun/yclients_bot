@@ -27,6 +27,12 @@ echo 'TELEGRAM_BOT_TOKEN=your-token' > .env
 env GOCACHE=/tmp/go-build GOMODCACHE=/tmp/go-mod-cache go run .
 ```
 
+If you want the `schedule` command to work, also export:
+
+```bash
+export YCLIENTS_BEARER_TOKEN='your-token'
+```
+
 ## Deploy on a VPS
 
 Run the process under `systemd` so it starts on boot and restarts if it exits unexpectedly.
@@ -66,6 +72,11 @@ Each item contains only:
 - `ID`
 - `Title`
 - `PriceMin`
+
+## Bot commands
+
+- `hello` replies with `Hello!`
+- `schedule` fetches available services, checks each service for the next 7 days in `Europe/Moscow`, and returns only services that have at least one slot
 
 ## Run the real Yclients integration test
 

@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
+	"os"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"yclients_bot/bot"
 	"yclients_bot/config"
+	"yclients_bot/yclients"
 )
 
 func main() {
@@ -27,6 +31,23 @@ func run(token string) error {
 		return err
 	}
 
+	moscow, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		return err
+	}
+
+	deps := bot.Dependencies{
+		LocationID: 1296020,
+		Location:   moscow,
+	}
+
+	if yToken := os.Getenv("YCLIENTS_BEARER_TOKEN"); yToken != "" {
+		deps.Scheduler = &yclients.Client{
+			BaseURL: "https://platform.yclients.com",
+			Token:   yToken,
+		}
+	}
+
 	updateConfig := tgbotapi.NewUpdate(0)
 	updateConfig.Timeout = 60
 
@@ -40,7 +61,12 @@ func run(token string) error {
 			continue
 		}
 
-		replyText, ok := bot.ReplyForText(update.Message.Text)
+		replyText, ok, err := bot.HandleText(context.Background(), update.Message.Text, deps)
+		if err != nil {
+			log.Printf("handle text: %v", err)
+			replyText = "Failed to load schedule."
+			ok = true
+		}
 		if !ok {
 			continue
 		}
