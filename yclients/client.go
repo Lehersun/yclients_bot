@@ -3,15 +3,25 @@ package yclients
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
-const searchTimeSlotsPath = "/api/v1/b2c/booking/availability/search-timeslots"
+const (
+	searchTimeSlotsPath     = "/api/v1/b2c/booking/availability/search-timeslots"
+	searchServicesPath      = "/api/v1/b2c/booking/availability/search-services"
+	appClientContextVersion = "2"
+)
 
 type Client struct {
 	BaseURL    string
@@ -21,7 +31,6 @@ type Client struct {
 
 type Service struct {
 	ID       int
-	Title    string
 	PriceMin float64
 }
 
@@ -31,117 +40,74 @@ type SearchTimeSlotsParams struct {
 	ServiceID  int
 }
 
-type searchTimeSlotsRequest struct {
-	Context searchTimeSlotsContext `json:"context"`
-	Filter  searchTimeSlotsFilter  `json:"filter"`
-}
-
-type searchTimeSlotsContext struct {
+type requestContext struct {
 	LocationID int `json:"location_id"`
 }
 
-type searchTimeSlotsFilter struct {
-	Date    string                  `json:"date"`
-	Records []searchTimeSlotsRecord `json:"records,omitempty"`
-}
-
-type searchTimeSlotsRecord struct {
-	AttendanceServiceItems []searchTimeSlotsAttendanceServiceItem `json:"attendance_service_items"`
-}
-
-type searchTimeSlotsAttendanceServiceItem struct {
+type attendanceServiceItem struct {
 	Type string `json:"type"`
 	ID   int    `json:"id"`
 }
 
-type searchTimeSlotsResponse struct {
-	Data []searchTimeSlotsResponseItem `json:"data"`
+type record struct {
+	AttendanceServiceItems []attendanceServiceItem `json:"attendance_service_items"`
 }
 
-type searchTimeSlotsResponseItem struct {
-	Attributes searchTimeSlotsAttributes `json:"attributes"`
+type timeSlotsRequest struct {
+	Context requestContext  `json:"context"`
+	Filter  timeSlotsFilter `json:"filter"`
 }
 
-type searchTimeSlotsAttributes struct {
+type timeSlotsFilter struct {
+	Date    string   `json:"date"`
+	Records []record `json:"records,omitempty"`
+}
+
+type timeSlotsResponse struct {
+	Data []timeSlotsItem `json:"data"`
+}
+
+type timeSlotsItem struct {
+	Attributes timeSlotAttributes `json:"attributes"`
+}
+
+type timeSlotAttributes struct {
 	DateTime   string `json:"datetime"`
-	Time       string `json:"time"`
 	IsBookable bool   `json:"is_bookable"`
 }
 
-type availableServicesResponse struct {
-	Services []availableServiceItem `json:"services"`
+type servicesRequest struct {
+	Context requestContext `json:"context"`
+	Filter  servicesFilter `json:"filter"`
 }
 
-type availableServiceItem struct {
-	ID       int     `json:"id"`
-	Title    string  `json:"title"`
-	PriceMin float64 `json:"price_min"`
+type servicesFilter struct {
+	Records []record `json:"records"`
 }
 
-func (c Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeSlotsParams) ([]time.Time, error) {
-	requestBody := searchTimeSlotsRequest{
-		Context: searchTimeSlotsContext{
-			LocationID: params.LocationID,
-		},
-		Filter: searchTimeSlotsFilter{
-			Date: params.Date,
-		},
-	}
+type servicesResponse struct {
+	Data []serviceItem `json:"data"`
+}
 
-	if params.ServiceID != 0 {
-		requestBody.Filter.Records = []searchTimeSlotsRecord{
-			{
-				AttendanceServiceItems: []searchTimeSlotsAttendanceServiceItem{
-					{
-						Type: "service",
-						ID:   params.ServiceID,
-					},
-				},
-			},
-		}
-	}
+type serviceItem struct {
+	ID         string            `json:"id"`
+	Attributes serviceAttributes `json:"attributes"`
+}
 
-	bodyBytes, err := json.Marshal(requestBody)
-	if err != nil {
+type serviceAttributes struct {
+	IsBookable bool    `json:"is_bookable"`
+	PriceMin   float64 `json:"price_min"`
+}
+
+func (c *Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeSlotsParams) ([]time.Time, error) {
+	var response timeSlotsResponse
+	if err := c.doJSON(ctx, "search-timeslots", http.MethodPost, searchTimeSlotsPath, makeSearchTimeSlotsRequest(params), &response); err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+searchTimeSlotsPath, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
-
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("yclients search-timeslots failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var decoded searchTimeSlotsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, err
-	}
-
-	slots := make([]time.Time, 0, len(decoded.Data))
-	for _, item := range decoded.Data {
-		if !item.Attributes.IsBookable {
-			continue
-		}
-
-		if strings.TrimSpace(item.Attributes.DateTime) == "" {
+	slots := make([]time.Time, 0, len(response.Data))
+	for _, item := range response.Data {
+		if !item.Attributes.IsBookable || strings.TrimSpace(item.Attributes.DateTime) == "" {
 			continue
 		}
 
@@ -156,43 +122,207 @@ func (c Client) SearchAvailableTimeSlots(ctx context.Context, params SearchTimeS
 	return slots, nil
 }
 
-func (c Client) AvailableServices(ctx context.Context, locationID int) ([]Service, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/v1/b2c/booking/availability/book_services/%d?without_seances=1", strings.TrimRight(c.BaseURL, "/"), locationID), nil)
-	if err != nil {
+func (c *Client) AvailableServices(ctx context.Context, locationID int) ([]Service, error) {
+	var response servicesResponse
+	if err := c.doJSON(ctx, "available-services", http.MethodPost, searchServicesPath, makeSearchServicesRequest(locationID), &response); err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	services := make([]Service, 0, len(response.Data))
+	for _, item := range response.Data {
+		if !item.Attributes.IsBookable {
+			continue
+		}
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = http.DefaultClient
+		serviceID, err := strconv.Atoi(item.ID)
+		if err != nil {
+			return nil, fmt.Errorf("parse service id %q: %w", item.ID, err)
+		}
+
+		services = append(services, Service{
+			ID:       serviceID,
+			PriceMin: item.Attributes.PriceMin,
+		})
 	}
 
-	resp, err := httpClient.Do(req)
+	return services, nil
+}
+
+func makeSearchTimeSlotsRequest(params SearchTimeSlotsParams) timeSlotsRequest {
+	request := timeSlotsRequest{
+		Context: requestContext{LocationID: params.LocationID},
+		Filter:  timeSlotsFilter{Date: params.Date},
+	}
+
+	if params.ServiceID != 0 {
+		request.Filter.Records = []record{
+			{
+				AttendanceServiceItems: []attendanceServiceItem{
+					{Type: "service", ID: params.ServiceID},
+				},
+			},
+		}
+	}
+
+	return request
+}
+
+func makeSearchServicesRequest(locationID int) servicesRequest {
+	return servicesRequest{
+		Context: requestContext{LocationID: locationID},
+		Filter: servicesFilter{
+			Records: []record{
+				{AttendanceServiceItems: []attendanceServiceItem{}},
+			},
+		},
+	}
+}
+
+func (c *Client) doJSON(ctx context.Context, operation string, method string, path string, input any, output any) error {
+	if err := c.normalizeBaseURL(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.Token) == "" {
+		return errors.New("yclients token is required")
+	}
+
+	var body io.Reader
+	if input != nil {
+		payload, err := json.Marshal(input)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	if err := c.setCommonHeaders(req); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("yclients available-services failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("yclients %s failed: status %d: %s", operation, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	var decoded availableServicesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, err
+	if output == nil {
+		return nil
 	}
 
-	services := make([]Service, 0, len(decoded.Services))
-	for _, item := range decoded.Services {
-		services = append(services, Service{
-			ID:       item.ID,
-			Title:    item.Title,
-			PriceMin: item.PriceMin,
-		})
+	return json.NewDecoder(resp.Body).Decode(output)
+}
+
+func (c *Client) setCommonHeaders(req *http.Request) error {
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	analyticsUDID, appClientContext, err := makeAppClientContextHeaders()
+	if err != nil {
+		return err
 	}
 
-	return services, nil
+	req.Header.Set("X-App-Client-Context-Analytics-Udid", analyticsUDID)
+	req.Header.Set("X-App-Client-Context", appClientContext)
+	req.Header.Set("X-App-Client-Context-Version", appClientContextVersion)
+
+	return nil
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+
+	return http.DefaultClient
+}
+
+func (c *Client) normalizeBaseURL() error {
+	if strings.TrimSpace(c.BaseURL) == "" {
+		return errors.New("yclients base url is required")
+	}
+
+	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
+	return nil
+}
+
+func (c *Client) validateSearchTimeSlotsParams(params SearchTimeSlotsParams) error {
+	if err := c.validateLocationID(params.LocationID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(params.Date) == "" {
+		return errors.New("yclients date is required")
+	}
+
+	return nil
+}
+
+func (c *Client) validateLocationID(locationID int) error {
+	if locationID <= 0 {
+		return errors.New("yclients location id must be greater than zero")
+	}
+
+	return nil
+}
+
+func makeAppClientContextHeaders() (string, string, error) {
+	analyticsUDID, err := uuidV4()
+	if err != nil {
+		return "", "", err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"requestUdid": analyticsUDID,
+		"timestamp":   time.Now().Unix(),
+	})
+	if err != nil {
+		return "", "", err
+	}
+
+	appClientContext, err := encryptAppClientContext(analyticsUDID, payload)
+	if err != nil {
+		return "", "", err
+	}
+
+	return analyticsUDID, appClientContext, nil
+}
+
+func encryptAppClientContext(analyticsUDID string, payload []byte) (string, error) {
+	block, err := aes.NewCipher([]byte(analyticsUDID[:32]))
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+
+	ciphertextWithTag := gcm.Seal(nil, nonce, payload, nil)
+	return base64.StdEncoding.EncodeToString(nonce) + ":" + base64.StdEncoding.EncodeToString(ciphertextWithTag), nil
+}
+
+func uuidV4() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

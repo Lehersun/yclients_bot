@@ -297,10 +297,10 @@ func TestHandleSelectedDateSchedule(t *testing.T) {
 
 	scheduler := &fakeScheduler{
 		services: []yclients.Service{
-			{ID: 19432008, Title: "Падел 2 корт 2 часа вт-вс", PriceMin: 4800},
-			{ID: 19346630, Title: "Падел корт 2 вт-вс 1 час", PriceMin: 2400},
-			{ID: 23037453, Title: "Падел корт 3 вт-вс 2часа", PriceMin: 4800},
-			{ID: 19346628, Title: "Падел корт 1 вт-вс 1 час", PriceMin: 2400},
+			{ID: 19432008, PriceMin: 4800},
+			{ID: 19346630, PriceMin: 2400},
+			{ID: 23037453, PriceMin: 4800},
+			{ID: 19346628, PriceMin: 2400},
 		},
 		slotsByKey: map[string][]time.Time{
 			"19432008|2026-03-20": {slotA, slotB},

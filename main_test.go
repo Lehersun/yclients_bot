@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,8 +73,8 @@ func TestProcessUpdateSelectedDateShowsAndRemovesWaitingMessage(t *testing.T) {
 	}
 	scheduler := &mainFakeScheduler{
 		services: []yclients.Service{
-			{ID: 1, Title: "Court 1"},
-			{ID: 2, Title: "Court 2"},
+			{ID: 1},
+			{ID: 2},
 		},
 		slotsByKey: map[string][]time.Time{
 			"1|2026-03-20": {time.Date(2026, time.March, 20, 8, 0, 0, 0, moscow)},
@@ -270,6 +271,7 @@ type mainFakeScheduler struct {
 	slotCalls            []yclients.SearchTimeSlotsParams
 	availableServicesErr error
 	searchTimeSlotsErr   error
+	mu                   sync.Mutex
 }
 
 func (f *mainFakeScheduler) AvailableServices(context.Context, int) ([]yclients.Service, error) {
@@ -283,7 +285,11 @@ func (f *mainFakeScheduler) SearchAvailableTimeSlots(_ context.Context, params y
 	if f.searchTimeSlotsErr != nil {
 		return nil, f.searchTimeSlotsErr
 	}
+
+	f.mu.Lock()
 	f.slotCalls = append(f.slotCalls, params)
+	f.mu.Unlock()
+
 	return f.slotsByKey[mainSlotKey(params.ServiceID, params.Date)], nil
 }
 

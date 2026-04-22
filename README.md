@@ -62,15 +62,14 @@ slots, err := client.SearchAvailableTimeSlots(ctx, yclients.SearchTimeSlotsParam
 
 It returns parsed `[]time.Time` values for entries where the API marks `is_bookable` as `true`.
 
-You can also fetch projected available services in Yclients API order:
+You can also fetch currently bookable services through Yclients booking availability:
 
 ```go
 services, err := client.AvailableServices(ctx, 1296020)
 ```
 
-Each item contains only:
+Each item contains:
 - `ID`
-- `Title`
 - `PriceMin`
 
 ## Bot commands
